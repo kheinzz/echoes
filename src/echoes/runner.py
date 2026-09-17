@@ -5,6 +5,7 @@
         transcription.json   Whisper segments with word timestamps
         diarization.json     speaker turns
         transcript.txt|srt|json
+        summary.md           optional summary written by an LLM
 """
 
 from __future__ import annotations
@@ -22,9 +23,10 @@ from pathlib import Path
 
 from echoes import __version__
 from echoes.diarization import DEFAULT_PIPELINE
-from echoes.export import FORMATS, render
+from echoes.export import FORMATS, render, to_txt
 from echoes.merge import assign_speakers, group_consecutive, rename_speakers
-from echoes.schema import Segment, Turn, to_dicts
+from echoes.schema import Segment, Turn, Utterance, to_dicts
+from echoes.summary import Client, Summary, SummaryError, make_client, summarize
 from echoes.transcription import DEFAULT_MODEL
 
 log = logging.getLogger(__name__)
@@ -54,18 +56,24 @@ class Options:
     transcription: Path | None = None
     speaker_label: str = "Speaker"
     formats: tuple[str, ...] = FORMATS
+    # LLM provider for the optional summary (see echoes.summary.PROVIDERS)
+    summary: str | None = None
+    summary_model: str | None = None
+    summary_base_url: str | None = None
+    summary_api_key: str | None = field(default=None, repr=False)
 
     def to_json(self) -> dict:
         data = asdict(self)
-        del data["hf_token"]
+        del data["hf_token"], data["summary_api_key"]
         return {key: str(value) if isinstance(value, Path) else value for key, value in data.items()}
 
 
 class Manifest:
     """run.json, rewritten after each step so a failed run stays documented."""
 
-    def __init__(self, path: Path, **data):
+    def __init__(self, path: Path, total_steps: int, **data):
         self.path = path
+        self.total_steps = total_steps
         self.data = {**data, "status": "running", "steps": {}}
         self.save()
 
@@ -74,7 +82,7 @@ class Manifest:
 
     @contextmanager
     def step(self, number: int, name: str) -> Iterator[dict]:
-        log.info("Step %d/3 - %s", number, name)
+        log.info("Step %d/%d - %s", number, self.total_steps, name)
         info: dict = {}
         self.data["steps"][name] = info
         start = time.perf_counter()
@@ -92,6 +100,11 @@ def run(opts: Options) -> Path:
     transcription_path = opts.transcription.resolve() if opts.transcription else None
     if transcription_path and not transcription_path.is_file():
         raise FileNotFoundError(f"Transcription file not found: {transcription_path}")
+    client = (
+        make_client(opts.summary, opts.summary_model, opts.summary_base_url, opts.summary_api_key)
+        if opts.summary
+        else None
+    )
 
     run_dir = create_run_dir(opts.output_dir or audio_path.parent / RUNS_DIRNAME, audio_path.stem)
     log.info("Run directory: %s", run_dir)
@@ -99,6 +112,7 @@ def run(opts: Options) -> Path:
     log.info("Compute device: %s", device)
     manifest = Manifest(
         run_dir / "run.json",
+        total_steps=4 if client else 3,
         echoes_version=__version__,
         started_at=datetime.now().isoformat(timespec="seconds"),
         options=opts.to_json(),
@@ -110,7 +124,7 @@ def run(opts: Options) -> Path:
         },
     )
     try:
-        _run_steps(opts, audio_path, transcription_path, run_dir, device, manifest)
+        _run_steps(opts, audio_path, transcription_path, run_dir, device, manifest, client)
     except BaseException as exc:
         manifest.data["status"] = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
         manifest.data["error"] = f"{type(exc).__name__}: {exc}"
@@ -129,6 +143,7 @@ def _run_steps(
     run_dir: Path,
     device: str,
     manifest: Manifest,
+    client: Client | None,
 ) -> None:
     from faster_whisper import decode_audio
 
@@ -202,6 +217,87 @@ def _run_steps(
             info["files"].append(path.name)
             log.info("Wrote %s", path)
 
+    if client is None:
+        return
+    with manifest.step(4, "summary") as info:
+        info["provider"] = client.provider.name
+        if not grouped:
+            log.warning("The transcript is empty: no summary")
+            info["skipped"] = "empty transcript"
+            return
+        language = opts.language or transcription.get("language")
+        try:
+            path, summary = save_summary(run_dir, to_txt(grouped), language, client)
+        except SummaryError as exc:
+            raise SummaryError(
+                f"{exc}\nThe transcript is saved. To retry only the summary, run:\n"
+                f"  {summarize_command(run_dir, opts)}"
+            ) from exc
+        info.update(model=summary.model, file=path.name)
+
+
+def summarize_run(
+    run_dir: Path,
+    provider: str,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> Path:
+    """Summarize the transcript of an existing run, and return the summary file.
+
+    transcript.txt is preferred, so that manual edits (e.g. real names instead
+    of speaker labels) are taken into account.
+    """
+    run_dir = run_dir.resolve()
+    if not run_dir.is_dir():
+        raise FileNotFoundError(f"Run directory not found: {run_dir}")
+    client = make_client(provider, model, base_url, api_key)
+    path, _ = save_summary(run_dir, read_transcript(run_dir), run_language(run_dir), client)
+    return path
+
+
+def save_summary(
+    run_dir: Path, transcript: str, language: str | None, client: Client
+) -> tuple[Path, Summary]:
+    summary = summarize(transcript, client, language=language)
+    path = write_new_file(run_dir / "summary.md", summary.to_markdown())
+    log.info("Wrote %s", path)
+    return path, summary
+
+
+def summarize_command(run_dir: Path, opts: Options) -> str:
+    command = f'echoes summarize "{run_dir}" --provider {opts.summary}'
+    if opts.summary_model:
+        command += f' --model "{opts.summary_model}"'
+    if opts.summary_base_url:
+        command += f' --base-url "{opts.summary_base_url}"'
+    return command
+
+
+def read_transcript(run_dir: Path) -> str:
+    """Transcript text of a previous run."""
+    path = run_dir / "transcript.txt"
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    path = run_dir / "transcript.json"
+    if path.is_file():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return to_txt([Utterance(**utterance) for utterance in data["utterances"]])
+    raise FileNotFoundError(f"No transcript.txt or transcript.json in {run_dir}")
+
+
+def run_language(run_dir: Path) -> str | None:
+    """Language of a previous run: set by the user, or detected by Whisper."""
+    path = run_dir / "run.json"
+    if path.is_file():
+        options = json.loads(path.read_text(encoding="utf-8")).get("options", {})
+        if options.get("language"):
+            return options["language"]
+    path = run_dir / "transcription.json"
+    if path.is_file():
+        return load_transcription(path).get("language")
+    return None
+
 
 def create_run_dir(root: Path, name: str) -> Path:
     """Create `root/<name>_<timestamp>`, with a numeric suffix if it exists."""
@@ -214,6 +310,19 @@ def create_run_dir(root: Path, name: str) -> Path:
         except FileExistsError:
             suffix += 1
             run_dir = base.with_name(f"{base.name}_{suffix}")
+
+
+def write_new_file(path: Path, text: str) -> Path:
+    """Write `text` to `path`, or to `<stem>_2<suffix>`... if it already exists."""
+    candidate, suffix = path, 1
+    while True:
+        try:
+            with candidate.open("x", encoding="utf-8") as file:
+                file.write(text)
+            return candidate
+        except FileExistsError:
+            suffix += 1
+            candidate = path.with_name(f"{path.stem}_{suffix}{path.suffix}")
 
 
 def load_transcription(path: Path) -> dict:

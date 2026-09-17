@@ -5,13 +5,15 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from echoes import __version__
 from echoes.diarization import DEFAULT_PIPELINE
 from echoes.export import FORMATS
+from echoes.summary import PROVIDERS, SummaryError
 from echoes.transcription import DEFAULT_MODEL
 
 log = logging.getLogger("echoes")
@@ -23,14 +25,41 @@ NOISY_WARNINGS = (
     r"std\(\): degrees of freedom is <= 0",
 )
 
+ENV_FILE = Path(".env")
+ENV_FILE_HELP = (
+    "file with API keys and tokens, one NAME=value per line "
+    "(default: .env in the current folder, if it exists)"
+)
+SUMMARY_NOTE = (
+    "Except with ollama, which runs locally, the transcript text is sent to the "
+    "provider. API keys are read from the environment or the .env file: "
+    + ", ".join(p.key_vars[0] for p in PROVIDERS.values() if p.key_vars)
+    + "."
+)
+PROVIDERS_LIST = ", ".join(PROVIDERS)
+MODEL_HELP = (
+    "LLM model (default: "
+    + ", ".join(f"{p.default_model} for {p.name}" for p in PROVIDERS.values() if p.default_model)
+    + "; required for ollama)"
+)
+BASE_URL_HELP = (
+    "API address, for an OpenAI-compatible service with the openai provider "
+    "(OpenRouter, Groq, LM Studio...) or a remote Ollama server"
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="echoes",
         description=(
             "Transcribe an audio file with speaker labels and timestamps "
-            "(faster-whisper + pyannote.audio). Each run is saved in its own "
-            "timestamped directory."
+            "(faster-whisper + pyannote.audio), and optionally summarize it with an LLM. "
+            "Each run is saved in its own timestamped directory."
+        ),
+        epilog=(
+            "To summarize an existing run, e.g. after replacing speaker labels by names "
+            "in transcript.txt: echoes summarize RUN_DIR --provider PROVIDER "
+            "(see echoes summarize --help)"
         ),
     )
     parser.add_argument("audio", type=Path, help="audio or video file (mp3, wav, m4a, mp4...)")
@@ -45,6 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--speaker-label", default="Speaker",
         help='prefix of speaker names, e.g. "Locuteur" gives "Locuteur 1" (default: Speaker)',
+    )
+    parser.add_argument(
+        "--env-file", type=Path, default=ENV_FILE, metavar="FILE", help=ENV_FILE_HELP
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="show debug messages")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -97,8 +129,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dia.add_argument(
         "--hf-token",
-        help="Hugging Face token (default: $HF_TOKEN or the token saved by `hf auth login`)",
+        help="Hugging Face token (default: HF_TOKEN from the environment or the .env file, "
+        "or the token saved by `hf auth login`)",
     )
+
+    summary = parser.add_argument_group("summary (optional)", SUMMARY_NOTE)
+    summary.add_argument(
+        "--summary", choices=PROVIDERS, metavar="PROVIDER",
+        help=f"summarize the conversation into summary.md with an LLM: {PROVIDERS_LIST}",
+    )
+    summary.add_argument("--summary-model", metavar="MODEL", help=MODEL_HELP)
+    summary.add_argument("--summary-base-url", metavar="URL", help=BASE_URL_HELP)
+    return parser
+
+
+def build_summarize_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="echoes summarize",
+        description=(
+            "Summarize the transcript of an existing run with an LLM. transcript.txt is "
+            "used, including your edits (e.g. real names instead of speaker labels). "
+            "The summary is saved in the run directory, without overwriting previous ones. "
+            + SUMMARY_NOTE
+        ),
+    )
+    parser.add_argument(
+        "run_dir", type=Path, metavar="RUN_DIR", help="run directory created by echoes"
+    )
+    parser.add_argument(
+        "-p", "--provider", choices=PROVIDERS, required=True, metavar="PROVIDER",
+        help=f"LLM provider: {PROVIDERS_LIST}",
+    )
+    parser.add_argument("-m", "--model", help=MODEL_HELP)
+    parser.add_argument("--base-url", metavar="URL", help=BASE_URL_HELP)
+    parser.add_argument(
+        "--env-file", type=Path, default=ENV_FILE, metavar="FILE", help=ENV_FILE_HELP
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="show debug messages")
     return parser
 
 
@@ -119,6 +186,20 @@ def positive_int(value: str) -> int:
     return number
 
 
+def load_env_file(path: Path) -> None:
+    """Load NAME=value lines into the environment, which keeps precedence."""
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        name, sep, value = line.partition("=")
+        name = name.strip().removeprefix("export ").strip()
+        if not sep or not name or name.startswith("#"):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if value:
+            os.environ.setdefault(name, value)
+
+
 def setup_logging(verbose: bool) -> None:
     logging.basicConfig(format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
     log.setLevel(logging.DEBUG if verbose else logging.INFO)
@@ -131,6 +212,10 @@ def setup_logging(verbose: bool) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["summarize"]:
+        return summarize_main(argv[1:])
+
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.batch_size > 1 and not args.vad:
@@ -139,9 +224,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--num-speakers cannot be combined with --min/--max-speakers")
     if args.min_speakers and args.max_speakers and args.min_speakers > args.max_speakers:
         parser.error("--min-speakers is greater than --max-speakers")
+    if (args.summary_model or args.summary_base_url) and not args.summary:
+        parser.error("--summary-model and --summary-base-url need --summary PROVIDER")
+    read_env_file(parser, args.env_file)
     setup_logging(args.verbose)
 
-    from echoes.diarization import ModelAccessError
     from echoes.runner import Options, run
 
     options = Options(
@@ -163,14 +250,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         transcription=args.transcription,
         speaker_label=args.speaker_label,
         formats=args.formats,
+        summary=args.summary,
+        summary_model=args.summary_model,
+        summary_base_url=args.summary_base_url,
     )
+    return report(lambda: run(options), args.verbose)
+
+
+def summarize_main(argv: Sequence[str]) -> int:
+    parser = build_summarize_parser()
+    args = parser.parse_args(argv)
+    read_env_file(parser, args.env_file)
+    setup_logging(args.verbose)
+
+    from echoes.runner import summarize_run
+
+    return report(
+        lambda: summarize_run(args.run_dir, args.provider, args.model, args.base_url),
+        args.verbose,
+    )
+
+
+def read_env_file(parser: argparse.ArgumentParser, path: Path) -> None:
+    # PowerShell and cmd don't expand "~"
+    path = path.expanduser()
+    if path.is_file():
+        load_env_file(path)
+    elif path != ENV_FILE:
+        parser.error(f"--env-file: file not found: {path}")
+
+
+def report(action: Callable[[], Path], verbose: bool) -> int:
+    """Run `action` and turn the expected errors into messages and exit codes."""
+    from echoes.diarization import ModelAccessError
+
     try:
-        run_dir = run(options)
-    except (FileNotFoundError, ValueError, ModelAccessError) as exc:
-        log.error("Error: %s", exc, exc_info=args.verbose)
+        path = action()
+    except (FileNotFoundError, ValueError, ModelAccessError, SummaryError) as exc:
+        log.error("Error: %s", exc, exc_info=verbose)
         return 1
     except KeyboardInterrupt:
         log.error("Interrupted")
         return 130
-    log.info("Done: %s", run_dir)
+    log.info("Done: %s", path)
     return 0
