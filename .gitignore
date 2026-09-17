@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# Editors
+.vscode/
+.idea/
+
+# Secrets
+.env
+*token*.txt
+
+# Run outputs and media (never commit recordings or transcripts)
+diarise_runs/
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.ogg
+*.opus
+*.mp4
+*.webm
