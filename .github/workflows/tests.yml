@@ -1,8 +1,11 @@
 name: tests
 
+# Manual runs only: automatic runs on push and pull requests are disabled.
+# To enable them again, add:
+#   push:
+#   pull_request:
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   pytest:

@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 log = logging.getLogger(__name__)
@@ -25,6 +25,8 @@ log = logging.getLogger(__name__)
 MAX_OUTPUT_TOKENS = 8192
 # Free tiers are often overloaded (HTTP 503): retry for about two minutes
 MAX_ATTEMPTS = 5
+# An overloaded model often stays so for a while: switch to the fallback sooner
+ATTEMPTS_BEFORE_FALLBACK = 2
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 HTTP_HINTS = {
     400: "check your API key and the model name",
@@ -32,8 +34,9 @@ HTTP_HINTS = {
     403: "check your API key and its permissions",
     404: "check the model name and the API address",
     429: "rate limit or quota reached: wait a moment, then retry with `echoes summarize`",
-    503: "the service is overloaded: retry later with `echoes summarize`, or pick another model",
+    503: "the model is overloaded: retry later with `echoes summarize`, or pick another model",
 }
+DAILY_QUOTA_HINT = "daily quota reached for this model: retry tomorrow, or pick another model"
 # Reasoning models served by some OpenAI-compatible APIs prepend their thoughts
 THINKING = re.compile(r"^\s*<think>.*?</think>", re.DOTALL)
 
@@ -49,15 +52,15 @@ First, decide which kind of conversation it is:
 - an open discussion: there is no clear question-and-answer structure.
 
 Then write the summary in Markdown, {language}, using the matching layout \
-below. Translate the headings into that language.
+below.{translate}
 
 Layout for an interview:
 
-# Summary
+# {summary}
 One short paragraph: who is interviewed (role, organization, if stated), the \
 subject and the main takeaways.
 
-## Questions
+## {questions}
 ### 1. <the question, rephrased concisely> (<start time, HH:MM:SS>)
 The answer, summarized: key facts, figures, names, examples and opinions. \
 Short quotes when they are telling.
@@ -65,23 +68,26 @@ Short quotes when they are telling.
 (One section per question, in order. Merge follow-up questions and requests \
 for clarification into the question they relate to.)
 
-## Key points
+## {key_points}
 - The most important facts and ideas of the interview.
 
 Layout for an open discussion:
 
-# Summary
+# {summary}
 One short paragraph: the participants (if identifiable), the subject and the \
 main takeaways.
 
-## Topics
+## {topics}
 ### <topic>
 What was said about it, and by whom.
 
-## Decisions and next steps
+## {decisions}
 - Only if the discussion contains any; otherwise leave this section out.
 
 Rules:
+- Cover the whole conversation, from its beginning to its end{end}: a long \
+interview usually has many questions, and its last part matters as much as its \
+first one.
 - Use only information from the transcript. Do not add outside knowledge or \
 invent anything; when a passage is unclear, say so.
 - Refer to participants by their labels (e.g. "Speaker 1"), unless their name \
@@ -89,10 +95,24 @@ or role is clearly stated in the conversation.
 - Be concise, but keep concrete facts, figures, names and dates.
 - Answer with the Markdown summary only, without any introduction.
 """
+# Headings given ready-made: small models tend to copy English ones verbatim
+HEADINGS = {
+    "en": ("Summary", "Questions", "Key points", "Topics", "Decisions and next steps"),
+    "fr": ("Résumé", "Questions", "Points clés", "Thèmes", "Décisions et prochaines étapes"),
+    "es": ("Resumen", "Preguntas", "Puntos clave", "Temas", "Decisiones y próximos pasos"),
+    "de": ("Zusammenfassung", "Fragen", "Kernpunkte", "Themen", "Entscheidungen und nächste Schritte"),
+    "it": ("Sintesi", "Domande", "Punti chiave", "Temi", "Decisioni e prossimi passi"),
+    "pt": ("Resumo", "Perguntas", "Pontos-chave", "Temas", "Decisões e próximos passos"),
+}
+TIMESTAMP = re.compile(r"--> (\d{2}:\d{2}:\d{2})")
 
 
 class SummaryError(RuntimeError):
     """The summary could not be produced."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status  # HTTP status of the provider's answer, if any
 
 
 @dataclass(frozen=True)
@@ -106,6 +126,8 @@ class Provider:
     call: Callable[[Client, str, str], tuple[str, str | None]]
     local: bool = False
     timeout: float = 600
+    # tried in turn when the default model is unavailable (overloaded, quota reached)
+    fallback_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,6 +138,8 @@ class Client:
     model: str
     url: str
     api_key: str | None = field(default=None, repr=False)
+    fallback_models: tuple[str, ...] = ()
+    max_attempts: int = MAX_ATTEMPTS
 
 
 @dataclass
@@ -145,6 +169,8 @@ def make_client(
         raise SummaryError(
             f"Unknown summary provider {provider!r} (choose among {', '.join(PROVIDERS)})"
         )
+    # an explicit model choice is respected: no fallback
+    fallback_models = () if model else spec.fallback_models
     model = model or spec.default_model
     if not model:
         raise SummaryError(
@@ -155,7 +181,8 @@ def make_client(
     # A custom address may be a local server that doesn't need any key
     if not api_key and spec.key_vars and not base_url:
         raise SummaryError(missing_key_help(spec))
-    return Client(spec, model, (base_url or spec.base_url).rstrip("/"), api_key)
+    url = (base_url or spec.base_url).rstrip("/")
+    return Client(spec, model, url, api_key, fallback_models)
 
 
 def summarize(transcript: str, client: Client, *, language: str | None = None) -> Summary:
@@ -168,19 +195,46 @@ def summarize(transcript: str, client: Client, *, language: str | None = None) -
         log.info("Summarizing with %s model '%s' on %s", spec.label, client.model, host)
     else:
         log.info("Sending the transcript to %s for the summary (model '%s')", host, client.model)
-    text, model = spec.call(client, system_prompt(language), f"Transcript:\n\n{transcript}")
+    system, prompt = system_prompt(language, transcript), f"Transcript:\n\n{transcript}"
+    models = (client.model, *client.fallback_models)
+    for index, model in enumerate(models):
+        is_last = index == len(models) - 1
+        attempts = client.max_attempts if is_last else ATTEMPTS_BEFORE_FALLBACK
+        try:
+            text, version = spec.call(
+                replace(client, model=model, max_attempts=attempts), system, prompt
+            )
+            break
+        except SummaryError as exc:
+            if is_last or exc.status not in RETRY_STATUSES:
+                raise
+            log.warning("Model '%s' is unavailable: falling back to '%s'", model, models[index + 1])
     text = THINKING.sub("", text).strip()
     if not text:
         raise SummaryError(f"{spec.label} returned an empty summary")
-    return Summary(text=text, provider=spec.name, model=model or client.model)
+    return Summary(text=text, provider=spec.name, model=version or model)
 
 
-def system_prompt(language: str | None) -> str:
+def system_prompt(language: str | None, transcript: str = "") -> str:
     if language:
         target = f'in the language with ISO 639-1 code "{language}"'
     else:
         target = "in the language of the transcript"
-    return SYSTEM_PROMPT.format(language=target)
+    headings = HEADINGS.get(language or "")
+    translate = "" if headings else " Translate the headings into that language."
+    summary, questions, key_points, topics, decisions = headings or HEADINGS["en"]
+    # An explicit end time keeps models from stopping halfway through long recordings
+    times = TIMESTAMP.findall(transcript)
+    return SYSTEM_PROMPT.format(
+        language=target,
+        translate=translate,
+        summary=summary,
+        questions=questions,
+        key_points=key_points,
+        topics=topics,
+        decisions=decisions,
+        end=f", at {times[-1]}" if times else "",
+    )
 
 
 def find_api_key(spec: Provider) -> str | None:
@@ -303,23 +357,28 @@ def post_json(url: str, payload: dict, headers: dict, client: Client) -> dict:
     label = client.provider.label
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", **{k: v for k, v in headers.items() if v}}
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    for attempt in range(1, client.max_attempts + 1):
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=client.provider.timeout) as response:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
-            message = error_message(exc)
-            if exc.code in RETRY_STATUSES and attempt < MAX_ATTEMPTS:
-                delay = retry_delay(exc, attempt)
+            error = read_error(exc)
+            # a daily quota won't come back before tomorrow: don't wait for it
+            retry = exc.code in RETRY_STATUSES and not error.daily_quota
+            if retry and attempt < client.max_attempts:
+                delay = retry_delay(exc, error, attempt)
                 log.warning(
-                    "%s answered HTTP %d (%s): retrying in %ds", label, exc.code, message, delay
+                    "%s answered HTTP %d (%s): retrying in %ds",
+                    label, exc.code, error.message, delay,
                 )
                 time.sleep(delay)
                 continue
-            hint = HTTP_HINTS.get(exc.code)
+            hint = DAILY_QUOTA_HINT if error.daily_quota else HTTP_HINTS.get(exc.code)
             raise SummaryError(
-                f"{label} answered HTTP {exc.code}: {message}" + (f"\n({hint})" if hint else "")
+                f"{label} answered HTTP {exc.code}: {error.message}"
+                + (f"\n({hint})" if hint else ""),
+                status=exc.code,
             ) from exc
         except OSError as exc:
             reason = getattr(exc, "reason", None) or exc
@@ -329,8 +388,15 @@ def post_json(url: str, payload: dict, headers: dict, client: Client) -> dict:
     raise AssertionError("unreachable")
 
 
-def error_message(exc: urllib.error.HTTPError) -> str:
-    """Extract the error message from the JSON body sent by the provider."""
+@dataclass
+class ApiError:
+    message: str
+    daily_quota: bool = False
+    retry_after: float | None = None
+
+
+def read_error(exc: urllib.error.HTTPError) -> ApiError:
+    """Extract what matters from the error body sent by the provider."""
     try:
         body = exc.read().decode("utf-8", errors="replace")
     except OSError:
@@ -338,20 +404,49 @@ def error_message(exc: urllib.error.HTTPError) -> str:
     try:
         data = json.loads(body)
     except ValueError:
-        return body.strip()[:300] or str(exc.reason)
+        return ApiError(shorten(body) or str(exc.reason))
     if isinstance(data, list) and data:
         data = data[0]
     error = data.get("error", data) if isinstance(data, dict) else data
-    if isinstance(error, dict):
-        error = error.get("message") or error.get("detail") or error
-    return str(error)[:300]
+    if not isinstance(error, dict):
+        return ApiError(shorten(str(error)))
+    result = ApiError(shorten(str(error.get("message") or error.get("detail") or error)))
+    # Google APIs detail which quota is exceeded, and when to retry
+    quotas = []
+    for detail in error.get("details") or []:
+        kind = str(detail.get("@type", "")) if isinstance(detail, dict) else ""
+        if kind.endswith("QuotaFailure"):
+            for violation in detail.get("violations") or []:
+                quota = str(violation.get("quotaId", "unknown"))
+                model = (violation.get("quotaDimensions") or {}).get("model")
+                limit = violation.get("quotaValue")
+                quotas.append(f"{quota} (limit {limit}" + (f", model {model})" if model else ")"))
+                result.daily_quota = result.daily_quota or "PerDay" in quota
+        elif kind.endswith("RetryInfo"):
+            result.retry_after = parse_seconds(detail.get("retryDelay"))
+    if quotas:
+        result.message = "quota exceeded: " + "; ".join(quotas)
+    return result
 
 
-def retry_delay(exc: urllib.error.HTTPError, attempt: int) -> int:
+def shorten(text: str) -> str:
+    return " ".join(text.split())[:500]
+
+
+def parse_seconds(value: object) -> float | None:
+    """Parse a protobuf duration such as "22.5s"."""
     try:
-        return min(int((exc.headers or {}).get("Retry-After", "")), 60)
+        return float(str(value).removesuffix("s"))
     except ValueError:
-        return min(10 * 2 ** (attempt - 1), 60)
+        return None
+
+
+def retry_delay(exc: urllib.error.HTTPError, error: ApiError, attempt: int) -> int:
+    try:
+        seconds = float((exc.headers or {}).get("Retry-After", ""))
+    except ValueError:
+        seconds = error.retry_after or 10 * 2 ** (attempt - 1)
+    return min(math.ceil(seconds), 60)
 
 
 PROVIDERS = {
@@ -366,6 +461,8 @@ PROVIDERS = {
             key_vars=("GEMINI_API_KEY", "GOOGLE_API_KEY"),
             key_url="https://aistudio.google.com/apikey",
             call=call_gemini,
+            # has its own free quota, and is less often overloaded
+            fallback_models=("gemini-flash-lite-latest",),
         ),
         Provider(
             name="openai",

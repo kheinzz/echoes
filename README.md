@@ -1,7 +1,5 @@
 # echoes
 
-[![tests](https://github.com/kheinzz/echoes/actions/workflows/tests.yml/badge.svg)](https://github.com/kheinzz/echoes/actions/workflows/tests.yml)
-
 Transcribe interviews, meetings and podcasts **with speaker labels and timestamps**, entirely on your own machine, using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and [pyannote.audio](https://github.com/pyannote/pyannote-audio). Optionally, summarize the conversation with the LLM of your choice.
 
 ```text
@@ -154,7 +152,7 @@ The summary is written in the language of the transcript.
 
 | `--summary` | Default model | Key in `.env` | Get a key |
 |---|---|---|---|
-| `gemini` | `gemini-flash-latest` | `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/apikey) (free tier available) |
+| `gemini` | `gemini-flash-latest`, or `gemini-flash-lite-latest` when it is unavailable | `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/apikey) (free tier available) |
 | `openai` | `gpt-5-mini` | `OPENAI_API_KEY` | [OpenAI platform](https://platform.openai.com/api-keys) |
 | `anthropic` | `claude-sonnet-5` | `ANTHROPIC_API_KEY` | [Anthropic console](https://console.anthropic.com/settings/keys) |
 | `mistral` | `mistral-medium-latest` | `MISTRAL_API_KEY` | [Mistral console](https://console.mistral.ai/api-keys) |
@@ -213,7 +211,7 @@ If a run fails or is interrupted, `run.json` records the error. Files from the s
 2. **Transcription**: Whisper produces text segments with word-level timestamps. Silences are skipped by a voice activity filter, which also limits hallucinations.
 3. **Diarization**: pyannote finds who speaks when. The *exclusive* variant is used, with at most one speaker at a time.
 4. **Alignment**: words are grouped into sentences, split on punctuation or on pauses longer than one second. Each sentence goes to the speaker who talks the most during its words, or to the nearest speaker when nothing overlaps. Consecutive sentences from the same speaker are then merged into turns.
-5. **Summary** (optional): the readable transcript is sent to the chosen LLM with instructions to find the questions, or the topics in an open discussion. Missing keys are detected before the transcription starts, and temporary errors (rate limits, overloaded service) are retried for about two minutes.
+5. **Summary** (optional): the readable transcript is sent to the chosen LLM with instructions to find the questions, or the topics in an open discussion. Missing keys are detected before the transcription starts, and temporary errors (rate limits, overloaded service) are retried for about two minutes. When the default model stays unavailable, a lighter fallback model is used, if the provider has one.
 
 ## Tips
 
@@ -221,7 +219,7 @@ If a run fails or is interrupted, `run.json` records the error. Files from the s
 - **Too many speakers?** A short noise or a laugh can create a spurious speaker. Re-run with `--num-speakers` or `--max-speakers`, reusing the transcription to save time.
 - **Wrong language?** Detection only listens to the first 30 seconds. Set `--language` if the recording starts with silence or music.
 - **Misspelled names?** Add them to `--hotwords`.
-- **"HTTP 503" or "HTTP 429" from the summary provider?** Free tiers are often overloaded or rate limited. Wait a little, then run `echoes summarize` on the run folder, or pick another model.
+- **"HTTP 503" or "HTTP 429" from the summary provider?** Free tiers are often overloaded, and allow only a few requests per minute and per day for each model (Gemini shows your limits on [ai.dev/rate-limit](https://ai.dev/rate-limit)). echoes waits when a per-minute limit is reached, but not for a daily one. With its default model, Gemini falls back to `gemini-flash-lite-latest` by itself. Otherwise, wait a little and run `echoes summarize` on the run folder, or pick another model with `--model`: [Google AI Studio](https://aistudio.google.com) lists the Gemini models available to your key.
 
 ## Privacy
 

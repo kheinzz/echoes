@@ -17,6 +17,8 @@ venv/
 *token*.txt
 
 # Run outputs and media (never commit recordings or transcripts)
+# data/input: recordings, data/output: runs (echoes ... -o data/output)
+data/
 echoes_runs/
 *.mp3
 *.wav

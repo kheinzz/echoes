@@ -4,7 +4,9 @@ import urllib.error
 import pytest
 from conftest import http_error
 
+from echoes import summary
 from echoes.summary import (
+    ATTEMPTS_BEFORE_FALLBACK,
     MAX_ATTEMPTS,
     PROVIDERS,
     Summary,
@@ -125,12 +127,105 @@ def test_transient_errors_are_retried(fake_llm):
 
 
 def test_retries_give_up(fake_llm):
-    quota_error = {"error": {"message": "quota exceeded"}}
-    fake_llm.reply(*(http_error(429, quota_error) for _ in range(MAX_ATTEMPTS)))
+    exceeded = {"error": {"message": "quota exceeded"}}
+    fake_llm.reply(*(http_error(429, exceeded) for _ in range(MAX_ATTEMPTS)))
+    client = make_client("gemini", model="gemini-flash-latest", api_key="k")
     with pytest.raises(SummaryError, match="quota exceeded") as error:
-        summarize(TRANSCRIPT, make_client("gemini", api_key="k"))
+        summarize(TRANSCRIPT, client)
+    assert error.value.status == 429
     assert "echoes summarize" in str(error.value)
     assert len(fake_llm.requests) == MAX_ATTEMPTS
+
+
+def test_default_model_falls_back_when_overloaded(fake_llm):
+    overloaded = {"error": {"message": "high demand"}}
+    fake_llm.reply(
+        *(http_error(503, overloaded) for _ in range(ATTEMPTS_BEFORE_FALLBACK)),
+        {"candidates": [{"content": {"parts": [{"text": "# Summary"}]}}]},
+    )
+
+    result = summarize(TRANSCRIPT, make_client("gemini", api_key="k"))
+
+    models = [request.full_url.split("/")[-1] for request in fake_llm.requests]
+    assert models == ["gemini-flash-latest:generateContent"] * ATTEMPTS_BEFORE_FALLBACK + [
+        "gemini-flash-lite-latest:generateContent"
+    ]
+    assert result.model == "gemini-flash-lite-latest"
+
+
+def test_fallback_gives_up_too(fake_llm):
+    overloaded = {"error": {"message": "high demand"}}
+    fake_llm.reply(
+        *(http_error(503, overloaded) for _ in range(ATTEMPTS_BEFORE_FALLBACK + MAX_ATTEMPTS))
+    )
+    with pytest.raises(SummaryError, match="high demand"):
+        summarize(TRANSCRIPT, make_client("gemini", api_key="k"))
+    assert len(fake_llm.requests) == ATTEMPTS_BEFORE_FALLBACK + MAX_ATTEMPTS
+
+
+PER_DAY = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+PER_MINUTE = "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"
+
+
+def quota_error(quota_id, retry_delay="22.5s"):
+    return {
+        "error": {
+            "code": 429,
+            "message": "You exceeded your current quota, please check your plan.",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [
+                        {
+                            "quotaId": quota_id,
+                            "quotaDimensions": {"model": "gemini-9-flash"},
+                            "quotaValue": "20",
+                        }
+                    ],
+                },
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay},
+            ],
+        }
+    }
+
+
+def test_daily_quota_is_not_retried(fake_llm):
+    fake_llm.reply(http_error(429, quota_error(PER_DAY)))
+    client = make_client("gemini", model="gemini-flash-latest", api_key="k")
+    with pytest.raises(SummaryError) as error:
+        summarize(TRANSCRIPT, client)
+    message = str(error.value)
+    assert f"{PER_DAY} (limit 20, model gemini-9-flash)" in message
+    assert "retry tomorrow" in message
+    assert len(fake_llm.requests) == 1
+
+
+def test_daily_quota_falls_back_at_once(fake_llm):
+    fake_llm.reply(
+        http_error(429, quota_error(PER_DAY)),
+        ANSWERS["gemini"],
+    )
+    summarize(TRANSCRIPT, make_client("gemini", api_key="k"))
+    models = [request.full_url.split("/")[-1].split(":")[0] for request in fake_llm.requests]
+    assert models == ["gemini-flash-latest", "gemini-flash-lite-latest"]
+
+
+def test_suggested_retry_delay_is_used(fake_llm, monkeypatch):
+    delays = []
+    monkeypatch.setattr(summary.time, "sleep", delays.append)
+    fake_llm.reply(
+        http_error(429, quota_error(PER_MINUTE)),
+        ANSWERS["gemini"],
+    )
+    summarize(TRANSCRIPT, make_client("gemini", model="gemini-flash-latest", api_key="k"))
+    assert delays == [23]
+
+
+def test_no_fallback_on_other_errors(fake_llm):
+    fake_llm.reply(http_error(403, {"error": {"message": "forbidden"}}))
+    with pytest.raises(SummaryError, match="forbidden"):
+        summarize(TRANSCRIPT, make_client("gemini", api_key="k"))
+    assert len(fake_llm.requests) == 1
 
 
 def test_client_errors_are_not_retried(fake_llm):
@@ -182,8 +277,22 @@ def test_empty_transcript_is_not_sent(fake_llm):
 
 
 def test_prompt_language():
-    assert '"en"' in system_prompt("en")
+    french = system_prompt("fr")
+    assert '"fr"' in french
+    assert "## Points clés" in french
+    assert "Translate the headings" not in french
+
+    unknown = system_prompt("nl")
+    assert "## Key points" in unknown
+    assert "Translate the headings" in unknown
+
     assert "language of the transcript" in system_prompt(None)
+
+
+def test_prompt_gives_the_end_of_the_conversation():
+    transcript = "[00:00:00 --> 00:00:04] A: Hi.\n\n[01:42:50 --> 01:43:05] B: Bye.\n\n"
+    assert "from its beginning to its end, at 01:43:05:" in system_prompt("en", transcript)
+    assert "from its beginning to its end:" in system_prompt("en", "No timestamps")
 
 
 def test_ollama_context_fits_the_transcript(fake_llm):
