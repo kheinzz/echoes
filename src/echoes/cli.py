@@ -9,12 +9,12 @@ import warnings
 from collections.abc import Sequence
 from pathlib import Path
 
-from diarise import __version__
-from diarise.diarization import DEFAULT_PIPELINE
-from diarise.export import FORMATS
-from diarise.transcription import DEFAULT_MODEL
+from echoes import __version__
+from echoes.diarization import DEFAULT_PIPELINE
+from echoes.export import FORMATS
+from echoes.transcription import DEFAULT_MODEL
 
-log = logging.getLogger("diarise")
+log = logging.getLogger("echoes")
 
 # Harmless third-party warnings printed on every run
 NOISY_LOGGERS = ("torch.utils.flop_counter",)
@@ -26,7 +26,7 @@ NOISY_WARNINGS = (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="diarise",
+        prog="echoes",
         description=(
             "Transcribe an audio file with speaker labels and timestamps "
             "(faster-whisper + pyannote.audio). Each run is saved in its own "
@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("audio", type=Path, help="audio or video file (mp3, wav, m4a, mp4...)")
     parser.add_argument(
         "-o", "--output-dir", type=Path,
-        help="where run directories are created (default: a diarise_runs folder next to the audio file)",
+        help="where run directories are created (default: an echoes_runs folder next to the audio file)",
     )
     parser.add_argument(
         "--formats", type=parse_formats, default=FORMATS,
@@ -141,8 +141,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--min-speakers is greater than --max-speakers")
     setup_logging(args.verbose)
 
-    from diarise.diarization import ModelAccessError
-    from diarise.runner import Options, run
+    from echoes.diarization import ModelAccessError
+    from echoes.runner import Options, run
 
     options = Options(
         audio=args.audio,

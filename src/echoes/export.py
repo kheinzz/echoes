@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 
-from diarise.schema import Utterance, to_dicts
+from echoes.schema import Utterance, to_dicts
 
 FORMATS = ("txt", "srt", "json")
 

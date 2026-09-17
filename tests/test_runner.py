@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from diarise.cli import parse_formats
-from diarise.runner import Options, create_run_dir, format_duration, load_transcription
+from echoes.cli import parse_formats
+from echoes.runner import Options, create_run_dir, format_duration, load_transcription
 
 
 def test_run_dirs_never_collide(tmp_path):

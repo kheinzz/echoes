@@ -6,7 +6,7 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
-from diarise.schema import Turn
+from echoes.schema import Turn
 
 if TYPE_CHECKING:
     import numpy as np

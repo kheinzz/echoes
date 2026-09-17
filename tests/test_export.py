@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from diarise.export import format_timestamp, render
-from diarise.schema import Utterance
+from echoes.export import format_timestamp, render
+from echoes.schema import Utterance
 
 SENTENCES = [
     Utterance(0.0, 1.5, "Speaker 1", "Hello."),

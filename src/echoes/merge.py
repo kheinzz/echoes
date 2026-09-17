@@ -12,7 +12,7 @@ from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 
-from diarise.schema import Segment, Turn, Utterance, Word
+from echoes.schema import Segment, Turn, Utterance, Word
 
 SENTENCE_END = (".", "?", "!", "…")
 CLOSING_CHARS = "\"'»)]”’"

@@ -20,17 +20,17 @@ from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from diarise import __version__
-from diarise.diarization import DEFAULT_PIPELINE
-from diarise.export import FORMATS, render
-from diarise.merge import assign_speakers, group_consecutive, rename_speakers
-from diarise.schema import Segment, Turn, to_dicts
-from diarise.transcription import DEFAULT_MODEL
+from echoes import __version__
+from echoes.diarization import DEFAULT_PIPELINE
+from echoes.export import FORMATS, render
+from echoes.merge import assign_speakers, group_consecutive, rename_speakers
+from echoes.schema import Segment, Turn, to_dicts
+from echoes.transcription import DEFAULT_MODEL
 
 log = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16_000
-RUNS_DIRNAME = "diarise_runs"
+RUNS_DIRNAME = "echoes_runs"
 TRACKED_PACKAGES = ("faster-whisper", "ctranslate2", "pyannote.audio", "torch")
 
 
@@ -99,7 +99,7 @@ def run(opts: Options) -> Path:
     log.info("Compute device: %s", device)
     manifest = Manifest(
         run_dir / "run.json",
-        diarise_version=__version__,
+        echoes_version=__version__,
         started_at=datetime.now().isoformat(timespec="seconds"),
         options=opts.to_json(),
         environment={
@@ -144,7 +144,7 @@ def _run_steps(
             transcription = load_transcription(transcription_path)
             info["reused_from"] = str(transcription_path)
         else:
-            from diarise.transcription import pick_compute_type, transcribe
+            from echoes.transcription import pick_compute_type, transcribe
 
             compute_type = (
                 pick_compute_type(device) if opts.compute_type == "auto" else opts.compute_type
@@ -172,7 +172,7 @@ def _run_steps(
         info["segments"] = len(segments)
 
     with manifest.step(2, "diarization") as info:
-        from diarise.diarization import diarize
+        from echoes.diarization import diarize
 
         turns = diarize(
             audio,

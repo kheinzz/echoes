@@ -1,4 +1,6 @@
-# diarise
+# echoes
+
+[![tests](https://github.com/kheinzz/echoes/actions/workflows/tests.yml/badge.svg)](https://github.com/kheinzz/echoes/actions/workflows/tests.yml)
 
 Transcribe interviews, meetings and podcasts **with speaker labels and timestamps**, entirely on your own machine, using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and [pyannote.audio](https://github.com/pyannote/pyannote-audio).
 
@@ -30,17 +32,17 @@ Transcribe interviews, meetings and podcasts **with speaker labels and timestamp
 ## Installation
 
 ```bash
-git clone https://github.com/kheinzz/diarise.git
-cd diarise
+git clone https://github.com/kheinzz/echoes.git
+cd echoes
 
 # with conda (or use python -m venv)
-conda create -n diarise python=3.11
-conda activate diarise
+conda create -n echoes python=3.11
+conda activate echoes
 
 # 1. PyTorch: pick the command matching your system on https://pytorch.org/get-started/locally/
 pip install torch --index-url https://download.pytorch.org/whl/cu126
 
-# 2. diarise and its dependencies
+# 2. echoes and its dependencies
 pip install -e .
 ```
 
@@ -62,26 +64,26 @@ The pyannote models are free but gated:
 
 ```bash
 # simplest form: language is detected automatically
-diarise interview.mp3
+echoes interview.mp3
 
 # French interview, French speaker labels, names Whisper should know
-diarise interview.mp3 --language fr --speaker-label Locuteur --hotwords "Dupont, CSTB, PLUi"
+echoes interview.mp3 --language fr --speaker-label Locuteur --hotwords "Dupont, CSTB, PLUi"
 
 # the number of speakers is known
-diarise interview.mp3 --num-speakers 3
+echoes interview.mp3 --num-speakers 3
 
 # re-run only the diarization, reusing the transcription of a previous run
-diarise interview.mp3 --num-speakers 3 \
-    --transcription diarise_runs/interview_2026-09-17_15-07-00/transcription.json
+echoes interview.mp3 --num-speakers 3 \
+    --transcription echoes_runs/interview_2026-09-17_15-07-00/transcription.json
 ```
 
-`python -m diarise` works too. Run `diarise --help` for all options.
+`python -m echoes` works too. Run `echoes --help` for all options.
 
 ### Main options
 
 | Option | Default | Description |
 |---|---|---|
-| `-o`, `--output-dir` | `diarise_runs/` next to the audio | Where run folders are created |
+| `-o`, `--output-dir` | `echoes_runs/` next to the audio | Where run folders are created |
 | `-m`, `--model` | `large-v3-turbo` | Whisper model: `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`... |
 | `-l`, `--language` | auto-detected | Language code (`fr`, `en`...) |
 | `--hotwords` | | Names and jargon to help recognition |
@@ -99,17 +101,17 @@ diarise interview.mp3 --num-speakers 3 \
 
 ```python
 from pathlib import Path
-from diarise.runner import Options, run
+from echoes.runner import Options, run
 
 run_dir = run(Options(audio=Path("interview.mp3"), language="fr", num_speakers=2))
 ```
 
 ## Output
 
-Each run creates its own folder, by default in a `diarise_runs` folder next to the audio file:
+Each run creates its own folder, by default in a `echoes_runs` folder next to the audio file:
 
 ```text
-diarise_runs/
+echoes_runs/
 └── interview_2026-09-17_15-07-00/
     ├── transcript.txt       readable transcript, one paragraph per speaker turn
     ├── transcript.srt       subtitles, one cue per sentence
@@ -138,7 +140,7 @@ If a run fails or is interrupted, `run.json` records the error. Files from the s
 ## Privacy
 
 - All processing happens locally. Models are downloaded once from Hugging Face and cached.
-- pyannote.audio 4 sends anonymous usage metrics (such as file duration and number of speakers) by default. **diarise turns them off**, unless you explicitly set `PYANNOTE_METRICS_ENABLED=1`.
+- pyannote.audio 4 sends anonymous usage metrics (such as file duration and number of speakers) by default. **echoes turns them off**, unless you explicitly set `PYANNOTE_METRICS_ENABLED=1`.
 - Recordings and transcripts often contain personal data. The `.gitignore` excludes audio files and run folders, but handle them according to your local regulations (e.g. GDPR).
 
 ## Development

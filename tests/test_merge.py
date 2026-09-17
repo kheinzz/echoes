@@ -1,4 +1,4 @@
-from diarise.merge import (
+from echoes.merge import (
     UNKNOWN_SPEAKER,
     SpeakerIndex,
     assign_speakers,
@@ -6,7 +6,7 @@ from diarise.merge import (
     rename_speakers,
     split_sentences,
 )
-from diarise.schema import Segment, Turn, Utterance, Word
+from echoes.schema import Segment, Turn, Utterance, Word
 
 
 def segment(*words: tuple[float, float, str]) -> Segment:

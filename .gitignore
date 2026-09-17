@@ -17,7 +17,7 @@ venv/
 *token*.txt
 
 # Run outputs and media (never commit recordings or transcripts)
-diarise_runs/
+echoes_runs/
 *.mp3
 *.wav
 *.m4a
