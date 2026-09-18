@@ -27,4 +27,8 @@ echoes_runs/
 *.ogg
 *.opus
 *.mp4
+*.mkv
+*.mov
+*.avi
+*.m4v
 *.webm

@@ -6,7 +6,6 @@ from conftest import http_error
 
 from echoes import summary
 from echoes.summary import (
-    ATTEMPTS_BEFORE_FALLBACK,
     MAX_ATTEMPTS,
     PROVIDERS,
     Summary,
@@ -129,38 +128,11 @@ def test_transient_errors_are_retried(fake_llm):
 def test_retries_give_up(fake_llm):
     exceeded = {"error": {"message": "quota exceeded"}}
     fake_llm.reply(*(http_error(429, exceeded) for _ in range(MAX_ATTEMPTS)))
-    client = make_client("gemini", model="gemini-flash-latest", api_key="k")
     with pytest.raises(SummaryError, match="quota exceeded") as error:
-        summarize(TRANSCRIPT, client)
+        summarize(TRANSCRIPT, make_client("gemini", api_key="k"))
     assert error.value.status == 429
     assert "echoes summarize" in str(error.value)
     assert len(fake_llm.requests) == MAX_ATTEMPTS
-
-
-def test_default_model_falls_back_when_overloaded(fake_llm):
-    overloaded = {"error": {"message": "high demand"}}
-    fake_llm.reply(
-        *(http_error(503, overloaded) for _ in range(ATTEMPTS_BEFORE_FALLBACK)),
-        {"candidates": [{"content": {"parts": [{"text": "# Summary"}]}}]},
-    )
-
-    result = summarize(TRANSCRIPT, make_client("gemini", api_key="k"))
-
-    models = [request.full_url.split("/")[-1] for request in fake_llm.requests]
-    assert models == ["gemini-flash-latest:generateContent"] * ATTEMPTS_BEFORE_FALLBACK + [
-        "gemini-flash-lite-latest:generateContent"
-    ]
-    assert result.model == "gemini-flash-lite-latest"
-
-
-def test_fallback_gives_up_too(fake_llm):
-    overloaded = {"error": {"message": "high demand"}}
-    fake_llm.reply(
-        *(http_error(503, overloaded) for _ in range(ATTEMPTS_BEFORE_FALLBACK + MAX_ATTEMPTS))
-    )
-    with pytest.raises(SummaryError, match="high demand"):
-        summarize(TRANSCRIPT, make_client("gemini", api_key="k"))
-    assert len(fake_llm.requests) == ATTEMPTS_BEFORE_FALLBACK + MAX_ATTEMPTS
 
 
 PER_DAY = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
@@ -191,41 +163,20 @@ def quota_error(quota_id, retry_delay="22.5s"):
 
 def test_daily_quota_is_not_retried(fake_llm):
     fake_llm.reply(http_error(429, quota_error(PER_DAY)))
-    client = make_client("gemini", model="gemini-flash-latest", api_key="k")
     with pytest.raises(SummaryError) as error:
-        summarize(TRANSCRIPT, client)
+        summarize(TRANSCRIPT, make_client("gemini", api_key="k"))
     message = str(error.value)
     assert f"{PER_DAY} (limit 20, model gemini-9-flash)" in message
     assert "retry tomorrow" in message
     assert len(fake_llm.requests) == 1
 
 
-def test_daily_quota_falls_back_at_once(fake_llm):
-    fake_llm.reply(
-        http_error(429, quota_error(PER_DAY)),
-        ANSWERS["gemini"],
-    )
-    summarize(TRANSCRIPT, make_client("gemini", api_key="k"))
-    models = [request.full_url.split("/")[-1].split(":")[0] for request in fake_llm.requests]
-    assert models == ["gemini-flash-latest", "gemini-flash-lite-latest"]
-
-
 def test_suggested_retry_delay_is_used(fake_llm, monkeypatch):
     delays = []
     monkeypatch.setattr(summary.time, "sleep", delays.append)
-    fake_llm.reply(
-        http_error(429, quota_error(PER_MINUTE)),
-        ANSWERS["gemini"],
-    )
-    summarize(TRANSCRIPT, make_client("gemini", model="gemini-flash-latest", api_key="k"))
+    fake_llm.reply(http_error(429, quota_error(PER_MINUTE)), ANSWERS["gemini"])
+    summarize(TRANSCRIPT, make_client("gemini", api_key="k"))
     assert delays == [23]
-
-
-def test_no_fallback_on_other_errors(fake_llm):
-    fake_llm.reply(http_error(403, {"error": {"message": "forbidden"}}))
-    with pytest.raises(SummaryError, match="forbidden"):
-        summarize(TRANSCRIPT, make_client("gemini", api_key="k"))
-    assert len(fake_llm.requests) == 1
 
 
 def test_client_errors_are_not_retried(fake_llm):

@@ -26,8 +26,8 @@ class TranscriptionResult:
 def pick_compute_type(device: str) -> str:
     """Return the fastest compute type supported by `device`.
 
-    float16 is preferred on GPU, but older cards (Pascal generation, e.g.
-    Quadro P2200 or GTX 10xx) can't run it efficiently: fall back to int8.
+    float16 is preferred on GPU, but older cards (Pascal generation and
+    earlier) can't run it efficiently: fall back to int8.
     """
     import ctranslate2
 

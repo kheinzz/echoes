@@ -26,7 +26,7 @@ Transcribe interviews, meetings and podcasts **with speaker labels and timestamp
 - Python 3.10 or newer
 - An NVIDIA GPU with CUDA 12 is strongly recommended. CPU works, but is much slower.
 - A free [Hugging Face](https://huggingface.co/join) account, to download the pyannote model
-- For summaries only: an API key from an LLM provider, or [Ollama](https://ollama.com) installed locally
+- For summaries only: an API key from an LLM provider (the [Gemini](https://aistudio.google.com/apikey) free tier is enough), or [Ollama](https://ollama.com) installed locally
 - No FFmpeg installation needed: audio is decoded with PyAV, which ships with faster-whisper.
 
 ## Installation
@@ -85,7 +85,7 @@ The pyannote models are free but gated:
 echoes interview.mp3
 
 # French interview, French speaker labels, names Whisper should know
-echoes interview.mp3 --language fr --speaker-label Locuteur --hotwords "Dupont, CSTB, PLUi"
+echoes interview.mp3 --language fr --speaker-label Locuteur --hotwords "Dupont, CNRS, RGPD"
 
 # the number of speakers is known
 echoes interview.mp3 --num-speakers 3
@@ -102,6 +102,8 @@ echoes summarize echoes_runs/interview_2026-09-17_15-07-00 --provider gemini
 ```
 
 `python -m echoes` works too. Run `echoes --help` and `echoes summarize --help` for all options.
+
+Video files (mp4, mkv, mov, webm...) are accepted everywhere an audio file is: their sound track is read directly, no conversion needed.
 
 ### Main options
 
@@ -148,11 +150,13 @@ With `--summary PROVIDER`, a fourth step sends the transcript to an LLM and writ
 
 The summary is written in the language of the transcript.
 
+A free API key is enough: the Gemini free tier summarizes a long interview at no cost. Free tiers limit how many requests each model accepts per minute and per day, and a long interview may need a model with a large context window (all the default models above have one).
+
 ### Providers
 
 | `--summary` | Default model | Key in `.env` | Get a key |
 |---|---|---|---|
-| `gemini` | `gemini-flash-latest`, or `gemini-flash-lite-latest` when it is unavailable | `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/apikey) (free tier available) |
+| `gemini` | `gemini-flash-latest` | `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/apikey) |
 | `openai` | `gpt-5-mini` | `OPENAI_API_KEY` | [OpenAI platform](https://platform.openai.com/api-keys) |
 | `anthropic` | `claude-sonnet-5` | `ANTHROPIC_API_KEY` | [Anthropic console](https://console.anthropic.com/settings/keys) |
 | `mistral` | `mistral-medium-latest` | `MISTRAL_API_KEY` | [Mistral console](https://console.mistral.ai/api-keys) |
@@ -211,15 +215,15 @@ If a run fails or is interrupted, `run.json` records the error. Files from the s
 2. **Transcription**: Whisper produces text segments with word-level timestamps. Silences are skipped by a voice activity filter, which also limits hallucinations.
 3. **Diarization**: pyannote finds who speaks when. The *exclusive* variant is used, with at most one speaker at a time.
 4. **Alignment**: words are grouped into sentences, split on punctuation or on pauses longer than one second. Each sentence goes to the speaker who talks the most during its words, or to the nearest speaker when nothing overlaps. Consecutive sentences from the same speaker are then merged into turns.
-5. **Summary** (optional): the readable transcript is sent to the chosen LLM with instructions to find the questions, or the topics in an open discussion. Missing keys are detected before the transcription starts, and temporary errors (rate limits, overloaded service) are retried for about two minutes. When the default model stays unavailable, a lighter fallback model is used, if the provider has one.
+5. **Summary** (optional): the readable transcript is sent to the chosen LLM with instructions to find the questions, or the topics in an open discussion. Missing keys are detected before the transcription starts, and temporary errors are retried a few times, waiting the delay the provider asks for.
 
 ## Tips
 
-- **GPU memory**: `large-v3` needs noticeably more memory than `large-v3-turbo`. On a 5 GB card (Quadro P2200), `large-v3` did not fit while `large-v3-turbo` runs fine. Closing GPU-hungry applications (browsers, video calls, GIS software) also helps.
+- **GPU memory**: `large-v3` needs noticeably more memory than `large-v3-turbo`. On a card with little memory, prefer `large-v3-turbo`, and close other applications that use the GPU.
 - **Too many speakers?** A short noise or a laugh can create a spurious speaker. Re-run with `--num-speakers` or `--max-speakers`, reusing the transcription to save time.
 - **Wrong language?** Detection only listens to the first 30 seconds. Set `--language` if the recording starts with silence or music.
 - **Misspelled names?** Add them to `--hotwords`.
-- **"HTTP 503" or "HTTP 429" from the summary provider?** Free tiers are often overloaded, and allow only a few requests per minute and per day for each model (Gemini shows your limits on [ai.dev/rate-limit](https://ai.dev/rate-limit)). echoes waits when a per-minute limit is reached, but not for a daily one. With its default model, Gemini falls back to `gemini-flash-lite-latest` by itself. Otherwise, wait a little and run `echoes summarize` on the run folder, or pick another model with `--model`: [Google AI Studio](https://aistudio.google.com) lists the Gemini models available to your key.
+- **"HTTP 429" or "HTTP 503" from the summary provider?** The model is busy, or you reached a rate limit. echoes retries a few times, but a daily quota only comes back the next day. Run `echoes summarize` on the run folder later, or choose another model with `--summary-model`: limits apply per model, so a lighter one is often still available. Gemini shows your usage and limits on [ai.dev/rate-limit](https://ai.dev/rate-limit).
 
 ## Privacy
 

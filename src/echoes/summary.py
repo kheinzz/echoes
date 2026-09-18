@@ -17,26 +17,25 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 
 log = logging.getLogger(__name__)
 
 MAX_OUTPUT_TOKENS = 8192
-# Free tiers are often overloaded (HTTP 503): retry for about two minutes
-MAX_ATTEMPTS = 5
-# An overloaded model often stays so for a while: switch to the fallback sooner
-ATTEMPTS_BEFORE_FALLBACK = 2
+MAX_ATTEMPTS = 3
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 HTTP_HINTS = {
     400: "check your API key and the model name",
     401: "check your API key",
     403: "check your API key and its permissions",
     404: "check the model name and the API address",
-    429: "rate limit or quota reached: wait a moment, then retry with `echoes summarize`",
-    503: "the model is overloaded: retry later with `echoes summarize`, or pick another model",
+    429: "rate limit reached: retry later with `echoes summarize`",
+    503: "the model is busy: retry later with `echoes summarize`, or choose another model",
 }
-DAILY_QUOTA_HINT = "daily quota reached for this model: retry tomorrow, or pick another model"
+DAILY_QUOTA_HINT = (
+    "daily quota reached for this model: retry tomorrow, or choose another model or plan"
+)
 # Reasoning models served by some OpenAI-compatible APIs prepend their thoughts
 THINKING = re.compile(r"^\s*<think>.*?</think>", re.DOTALL)
 
@@ -126,8 +125,6 @@ class Provider:
     call: Callable[[Client, str, str], tuple[str, str | None]]
     local: bool = False
     timeout: float = 600
-    # tried in turn when the default model is unavailable (overloaded, quota reached)
-    fallback_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -138,8 +135,6 @@ class Client:
     model: str
     url: str
     api_key: str | None = field(default=None, repr=False)
-    fallback_models: tuple[str, ...] = ()
-    max_attempts: int = MAX_ATTEMPTS
 
 
 @dataclass
@@ -169,8 +164,6 @@ def make_client(
         raise SummaryError(
             f"Unknown summary provider {provider!r} (choose among {', '.join(PROVIDERS)})"
         )
-    # an explicit model choice is respected: no fallback
-    fallback_models = () if model else spec.fallback_models
     model = model or spec.default_model
     if not model:
         raise SummaryError(
@@ -181,8 +174,7 @@ def make_client(
     # A custom address may be a local server that doesn't need any key
     if not api_key and spec.key_vars and not base_url:
         raise SummaryError(missing_key_help(spec))
-    url = (base_url or spec.base_url).rstrip("/")
-    return Client(spec, model, url, api_key, fallback_models)
+    return Client(spec, model, (base_url or spec.base_url).rstrip("/"), api_key)
 
 
 def summarize(transcript: str, client: Client, *, language: str | None = None) -> Summary:
@@ -195,24 +187,12 @@ def summarize(transcript: str, client: Client, *, language: str | None = None) -
         log.info("Summarizing with %s model '%s' on %s", spec.label, client.model, host)
     else:
         log.info("Sending the transcript to %s for the summary (model '%s')", host, client.model)
-    system, prompt = system_prompt(language, transcript), f"Transcript:\n\n{transcript}"
-    models = (client.model, *client.fallback_models)
-    for index, model in enumerate(models):
-        is_last = index == len(models) - 1
-        attempts = client.max_attempts if is_last else ATTEMPTS_BEFORE_FALLBACK
-        try:
-            text, version = spec.call(
-                replace(client, model=model, max_attempts=attempts), system, prompt
-            )
-            break
-        except SummaryError as exc:
-            if is_last or exc.status not in RETRY_STATUSES:
-                raise
-            log.warning("Model '%s' is unavailable: falling back to '%s'", model, models[index + 1])
+    system = system_prompt(language, transcript)
+    text, version = spec.call(client, system, f"Transcript:\n\n{transcript}")
     text = THINKING.sub("", text).strip()
     if not text:
         raise SummaryError(f"{spec.label} returned an empty summary")
-    return Summary(text=text, provider=spec.name, model=version or model)
+    return Summary(text=text, provider=spec.name, model=version or client.model)
 
 
 def system_prompt(language: str | None, transcript: str = "") -> str:
@@ -357,7 +337,7 @@ def post_json(url: str, payload: dict, headers: dict, client: Client) -> dict:
     label = client.provider.label
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", **{k: v for k, v in headers.items() if v}}
-    for attempt in range(1, client.max_attempts + 1):
+    for attempt in range(1, MAX_ATTEMPTS + 1):
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=client.provider.timeout) as response:
@@ -366,7 +346,7 @@ def post_json(url: str, payload: dict, headers: dict, client: Client) -> dict:
             error = read_error(exc)
             # a daily quota won't come back before tomorrow: don't wait for it
             retry = exc.code in RETRY_STATUSES and not error.daily_quota
-            if retry and attempt < client.max_attempts:
+            if retry and attempt < MAX_ATTEMPTS:
                 delay = retry_delay(exc, error, attempt)
                 log.warning(
                     "%s answered HTTP %d (%s): retrying in %ds",
@@ -455,14 +435,12 @@ PROVIDERS = {
         Provider(
             name="gemini",
             label="Google Gemini",
-            # an alias: pinned Gemini versions are soon closed to new users
+            # an alias: it follows the current Flash model, which pinned names don't
             default_model="gemini-flash-latest",
             base_url="https://generativelanguage.googleapis.com/v1beta",
             key_vars=("GEMINI_API_KEY", "GOOGLE_API_KEY"),
             key_url="https://aistudio.google.com/apikey",
             call=call_gemini,
-            # has its own free quota, and is less often overloaded
-            fallback_models=("gemini-flash-lite-latest",),
         ),
         Provider(
             name="openai",

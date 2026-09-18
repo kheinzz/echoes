@@ -92,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stt.add_argument(
         "--hotwords",
-        help='names and jargon to help recognition, e.g. "Dupont, CSTB, PLUi"',
+        help='names and jargon to help recognition, e.g. "Dupont, CNRS, RGPD"',
     )
     stt.add_argument("--beam-size", type=positive_int, default=5, help="beam size (default: 5)")
     stt.add_argument(
